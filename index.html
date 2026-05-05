@@ -34,6 +34,14 @@
 				document.addEventListener('DOMContentLoaded', fn);
 			}
 		}
+
+		function dxfToSvgString(dxfText){
+			if(!window.DxfParser){
+				throw new Error('DXF parser is not available');
+			}
+			var svgRoot = window.DxfParser.load(dxfText);
+			return window.DxfParser.toSvgString();
+		}
 		
 		ready(function(){
 			// FAQ toggle
@@ -327,8 +335,8 @@
 					return;
 				}
 
-				if(!file.type || (file.type.search('svg') < 0 && file.type.search('xml') < 0 &&  file.type.search('text') < 0)){
-					message.innerHTML = 'Only SVG files allowed';
+				if(file.type.search('svg') < 0 && !file.name.toLowerCase().endsWith('.dxf') && file.type.search('xml') < 0 && file.type.search('text') < 0){
+					message.innerHTML = 'Only SVG and DXF files allowed';
 					message.className = 'error animated bounce';
 					return
 				}
@@ -340,7 +348,12 @@
 					
 					if(reader.result){
 						try{
-							var svg = window.SvgNest.parsesvg(reader.result);
+							var fi = reader.result;
+
+							if(file.name.toLowerCase().endsWith('.dxf')){
+								fi = dxfToSvgString(reader.result);
+							}
+							var svg = window.SvgNest.parsesvg(fi);
 							{
 								var wholeSVG = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 								// Copy relevant scaling info

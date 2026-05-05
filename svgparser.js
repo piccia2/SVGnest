@@ -778,10 +778,347 @@
 
 		return poly;
 	};
-	
+
+	function DxfParser(){
+		this.dxfText = null;
+		this.entities = [];
+		this.svgRoot = null;
+		this.conf = {
+			vertexSampleCount: 32
+		};
+	}
+
+	DxfParser.prototype.load = function(dxfString){
+		if(!dxfString || typeof dxfString !== 'string'){
+			throw Error('invalid DXF string');
+		}
+
+		this.dxfText = dxfString;
+		var groups = this.parseGroups(dxfString);
+		var sections = this.parseSections(groups);
+		this.entities = this.parseEntities(sections['ENTITIES'] || []);
+		this.svgRoot = this.buildSvg(this.entities);
+		return this.svgRoot;
+	};
+
+	DxfParser.prototype.parseGroups = function(text){
+		var lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+		var groups = [];
+		for(var i=0; i<lines.length;){
+			var code = lines[i].trim();
+			i++;
+			if(!code){
+				continue;
+			}
+			var value = '';
+			while(i<lines.length && lines[i].trim() === ''){
+				i++;
+			}
+			if(i < lines.length){
+				value = lines[i].replace(/\r|\n/g,'');
+			}
+			groups.push({code: code, value: value});
+			i++;
+		}
+		return groups;
+	};
+
+	DxfParser.prototype.parseSections = function(groups){
+		var sections = {};
+		var currentSection = null;
+		var inSection = false;
+
+		for(var i=0; i<groups.length; i++){
+			var group = groups[i];
+			if(group.code === '0'){
+				if(group.value === 'SECTION'){
+					inSection = true;
+					currentSection = null;
+					continue;
+				}
+				if(group.value === 'ENDSEC'){
+					inSection = false;
+					currentSection = null;
+					continue;
+				}
+			}
+
+			if(inSection && group.code === '2'){
+				currentSection = group.value;
+				sections[currentSection] = [];
+				continue;
+			}
+
+			if(inSection && currentSection){
+				sections[currentSection].push(group);
+			}
+		}
+
+		return sections;
+	};
+
+	DxfParser.prototype.parseEntities = function(groups){
+		var entities = [];
+		var current = null;
+
+		for(var i=0; i<groups.length; i++){
+			var group = groups[i];
+			if(group.code === '0'){
+				if(current){
+					entities.push(current);
+				}
+				current = { type: group.value, data: [] };
+			}
+			else if(current){
+				current.data.push(group);
+			}
+		}
+
+		if(current){
+			entities.push(current);
+		}
+
+		var parsed = [];
+		for(var j=0; j<entities.length; j++){
+			var entity = entities[j];
+			switch(entity.type){
+				case 'LINE':
+					parsed.push(this.parseLine(entity.data));
+					break;
+				case 'LWPOLYLINE':
+					parsed.push(this.parseLwPolyline(entity.data));
+					break;
+				case 'POLYLINE':
+					parsed.push(this.parsePolylineBlock(entity, entities, j));
+					break;
+				case 'CIRCLE':
+					parsed.push(this.parseCircle(entity.data));
+					break;
+				case 'ARC':
+					parsed.push(this.parseArc(entity.data));
+					break;
+				case 'ELLIPSE':
+					parsed.push(this.parseEllipse(entity.data));
+					break;
+				default:
+					break;
+			}
+		}
+
+		return parsed.filter(function(item){ return !!item; });
+	};
+
+	DxfParser.prototype.parseLine = function(data){
+		return {
+			type: 'LINE',
+			x1: this.getNumber(data,'10',0),
+			y1: this.getNumber(data,'20',0),
+			x2: this.getNumber(data,'11',0),
+			y2: this.getNumber(data,'21',0)
+		};
+	};
+
+	DxfParser.prototype.parseLwPolyline = function(data){
+		var vertices = [];
+		var closed = (this.getNumber(data,'70',0) & 1) === 1;
+		for(var i=0; i<data.length; i++){
+			if(data[i].code === '10'){
+				vertices.push({ x: this.getNumber(data,'10',0, i), y: this.getNumber(data,'20',0, i) });
+			}
+		}
+		return { type:'POLYLINE', vertices: vertices, closed: closed };
+	};
+
+	DxfParser.prototype.parsePolylineBlock = function(entity, entities, index){
+		var vertices = [];
+		var closed = (this.getNumber(entity.data,'70',0) & 1) === 1;
+		var k = index + 1;
+		while(k < entities.length && entities[k].type === 'VERTEX'){
+			vertices.push({ x: this.getNumber(entities[k].data,'10',0), y: this.getNumber(entities[k].data,'20',0) });
+			k++;
+		}
+		return { type:'POLYLINE', vertices: vertices, closed: closed };
+	};
+
+	DxfParser.prototype.parseCircle = function(data){
+		return {
+			type:'CIRCLE',
+			cx: this.getNumber(data,'10',0),
+			cy: this.getNumber(data,'20',0),
+			r: this.getNumber(data,'40',0)
+		};
+	};
+
+	DxfParser.prototype.parseArc = function(data){
+		return {
+			type:'ARC',
+			cx: this.getNumber(data,'10',0),
+			cy: this.getNumber(data,'20',0),
+			r: this.getNumber(data,'40',0),
+			startAngle: this.getNumber(data,'50',0),
+			endAngle: this.getNumber(data,'51',0)
+		};
+	};
+
+	DxfParser.prototype.parseEllipse = function(data){
+		return {
+			type:'ELLIPSE',
+			cx: this.getNumber(data,'10',0),
+			cy: this.getNumber(data,'20',0),
+			majorX: this.getNumber(data,'11',0),
+			majorY: this.getNumber(data,'21',0),
+			ratio: this.getNumber(data,'40',0),
+			startParam: this.getNumber(data,'41',0),
+			endParam: this.getNumber(data,'42',0)
+		};
+	};
+
+	DxfParser.prototype.getNumber = function(data, code, fallback, startIndex){
+		startIndex = startIndex || 0;
+		for(var i=startIndex; i<data.length; i++){
+			if(data[i].code === code){
+				var value = parseFloat(data[i].value);
+				return isNaN(value) ? fallback : value;
+			}
+		}
+		return fallback;
+	};
+
+	DxfParser.prototype.buildSvg = function(entities){
+		var svgNS = 'http://www.w3.org/2000/svg';
+		var doc = new DOMParser().parseFromString('<svg xmlns="' + svgNS + '"></svg>','image/svg+xml');
+		var svg = doc.documentElement;
+		var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+		function updateBounds(x,y){
+			minX = Math.min(minX, x);
+			minY = Math.min(minY, y);
+			maxX = Math.max(maxX, x);
+			maxY = Math.max(maxY, y);
+		}
+
+		function addShape(shape){
+			var element = null;
+			if(shape.type === 'LINE'){
+				element = doc.createElementNS(svgNS, 'path');
+				element.setAttribute('d', 'M ' + shape.x1 + ' ' + shape.y1 + ' L ' + shape.x2 + ' ' + shape.y2);
+				updateBounds(shape.x1, shape.y1);
+				updateBounds(shape.x2, shape.y2);
+			}
+			else if(shape.type === 'POLYLINE'){
+				if(!shape.vertices.length){
+					return;
+				}
+				element = doc.createElementNS(svgNS, 'path');
+				var d = 'M ' + shape.vertices[0].x + ' ' + shape.vertices[0].y;
+				updateBounds(shape.vertices[0].x, shape.vertices[0].y);
+				for(var i=1; i<shape.vertices.length; i++){
+					d += ' L ' + shape.vertices[i].x + ' ' + shape.vertices[i].y;
+					updateBounds(shape.vertices[i].x, shape.vertices[i].y);
+				}
+				if(shape.closed){
+					d += ' Z';
+				}
+				element.setAttribute('d', d);
+			}
+			else if(shape.type === 'CIRCLE'){
+				element = doc.createElementNS(svgNS, 'circle');
+				element.setAttribute('cx', shape.cx);
+				element.setAttribute('cy', shape.cy);
+				element.setAttribute('r', shape.r);
+				updateBounds(shape.cx - shape.r, shape.cy - shape.r);
+				updateBounds(shape.cx + shape.r, shape.cy + shape.r);
+			}
+			else if(shape.type === 'ARC'){
+				element = doc.createElementNS(svgNS, 'path');
+				var start = this.pointOnCircle(shape.cx, shape.cy, shape.r, shape.startAngle);
+				var end = this.pointOnCircle(shape.cx, shape.cy, shape.r, shape.endAngle);
+				var delta = shape.endAngle - shape.startAngle;
+				if(delta <= 0){
+					delta += 360;
+				}
+				var largeArc = delta > 180 ? 1 : 0;
+				var d = 'M ' + start.x + ' ' + start.y + ' A ' + shape.r + ' ' + shape.r + ' 0 ' + largeArc + ' 1 ' + end.x + ' ' + end.y;
+				element.setAttribute('d', d);
+				updateBounds(start.x, start.y);
+				updateBounds(end.x, end.y);
+			}
+			else if(shape.type === 'ELLIPSE'){
+				element = doc.createElementNS(svgNS, 'path');
+				var points = this.approximateEllipse(shape);
+				if(!points.length){
+					return;
+				}
+				var d = 'M ' + points[0].x + ' ' + points[0].y;
+				updateBounds(points[0].x, points[0].y);
+				for(var j=1; j<points.length; j++){
+					d += ' L ' + points[j].x + ' ' + points[j].y;
+					updateBounds(points[j].x, points[j].y);
+				}
+				d += ' Z';
+				element.setAttribute('d', d);
+			}
+
+			if(element){
+				svg.appendChild(element);
+			}
+		};
+
+		for(var i=0; i<entities.length; i++){
+			addShape.call(this, entities[i]);
+		}
+
+		if(minX === Infinity){
+			minX = 0; minY = 0; maxX = 1; maxY = 1;
+		}
+
+		svg.setAttribute('viewBox', minX + ' ' + minY + ' ' + (maxX - minX) + ' ' + (maxY - minY));
+		return svg;
+	};
+
+	DxfParser.prototype.pointOnCircle = function(cx, cy, r, angleDegrees){
+		var radians = angleDegrees * Math.PI / 180;
+		return {
+			x: cx + r * Math.cos(radians),
+			y: cy + r * Math.sin(radians)
+		};
+	};
+
+	DxfParser.prototype.approximateEllipse = function(shape){
+		var points = [];
+		var count = this.conf.vertexSampleCount;
+		var startParam = shape.startParam;
+		var endParam = shape.endParam;
+		if(endParam <= startParam){
+			endParam += 2 * Math.PI;
+		}
+		var major = {x: shape.majorX, y: shape.majorY};
+		var minor = {x: -shape.majorY * shape.ratio, y: shape.majorX * shape.ratio};
+		for(var i=0; i<=count; i++){
+			var t = startParam + (endParam - startParam) * (i / count);
+			points.push({
+				x: shape.cx + major.x * Math.cos(t) + minor.x * Math.sin(t),
+				y: shape.cy + major.y * Math.cos(t) + minor.y * Math.sin(t)
+			});
+		}
+		return points;
+	};
+
+	DxfParser.prototype.toSvgString = function(){
+		if(!this.svgRoot){
+			return '';
+		}
+		return new XMLSerializer().serializeToString(this.svgRoot);
+	};
+
+	DxfParser.prototype.getSvgRoot = function(){
+		return this.svgRoot;
+	};
+
 	// expose public methods
 	var parser = new SvgParser();
-	
+	var dxfParser = new DxfParser();
+
 	root.SvgParser = {
 		config: parser.config.bind(parser),
 		load: parser.load.bind(parser),
@@ -789,5 +1126,11 @@
 		clean: parser.cleanInput.bind(parser),
 		polygonify: parser.polygonify.bind(parser)
 	};
-	
+
+	root.DxfParser = {
+		load: dxfParser.load.bind(dxfParser),
+		toSvgString: dxfParser.toSvgString.bind(dxfParser),
+		getSvgRoot: dxfParser.getSvgRoot.bind(dxfParser)
+	};
+
 }(window));
